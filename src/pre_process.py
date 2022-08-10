@@ -2,12 +2,7 @@ from tqdm import tqdm
 import json
 import random
 import numpy as np
-import os
-import wave
-
-import librosa
-import librosa.display
-import matplotlib.pyplot as plt
+import scipy.io.wavfile
 
 res_path  = "/home/brsf11/Hdd/ML/Dataset/MobvoiHotwords/mobvoi_hotword_dataset_resources/"
 data_path = "/home/brsf11/Hdd/ML/Dataset/MobvoiHotwords/mobvoi_hotword_dataset/"
@@ -55,11 +50,8 @@ class Dataset(object):
             self.p_file.append(p_json[index]['utt_id']+".wav")
 
 def melSpec(file):
-    y, sr = librosa.load(file,sr=16000)
-    # plt.plot(y);
-    # plt.title('Signal');
-    # plt.xlabel('Time (samples)');
-    # plt.ylabel('Amplitude');
+    sr, y = scipy.io.wavfile.read(file)
+
 
     duration = 3
     if len(y)/sr < duration:
@@ -67,24 +59,57 @@ def melSpec(file):
     else:
         y = y[0:(sr * duration - 1)]
 
+    pre_emphasis = 0.97
+    emphasized_signal = np.append(y[0], y[1:] - pre_emphasis * y[:-1])
+
+    # 分帧
+    frame_size = 0.025
+    frame_stride = 0.01
+    frame_length = int(round(frame_size*sr))
+    frame_step = int(round(frame_stride*sr)) 
+    signal_length = len(emphasized_signal)
+    num_frames = int(np.ceil(float(np.abs(signal_length-frame_length))/frame_step))
+
+    pad_signal_length = num_frames * frame_step + frame_length
+    pad_signal = np.append(emphasized_signal, np.zeros((pad_signal_length - signal_length)))
+
+    indices = np.tile(np.arange(0,frame_length),(num_frames,1))+np.tile(np.arange(0,num_frames*frame_step,frame_step), (frame_length, 1)).T
+    frames = pad_signal[np.mat(indices).astype(np.int32, copy=False)]
+
+    # 加汉明窗
+    frames *= np.hamming(frame_length)
+    # Explicit Implementation
+    # frames *= 0.54 - 0.46 * np.cos((2 * np.pi * n) / (frame_length - 1))
+
+    # 傅里叶变换和功率谱
     NFFT = 512
-    window_length = int(0.025 * sr)
-    hop_length = int(0.01 * sr)
-    # spec = np.abs(librosa.stft(y, n_fft=NFFT,hop_length=hop_length,win_length=window_length))
-    # spec = librosa.amplitude_to_db(spec, ref=np.max)
-    # librosa.display.specshow(spec, sr=sr, x_axis='time', y_axis='log');
-    # plt.colorbar(format='%+2.0f dB');
-    # plt.title('Spectrogram');
-    
-    mel_spect = librosa.feature.melspectrogram(y=y, sr=sr, n_fft=NFFT,hop_length=hop_length,win_length=window_length,n_mels=40)
-    mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
+    mag_frames = np.absolute(np.fft.rfft(frames, NFFT))  # Magnitude of the FFT
+    pow_frames = (1.0 / NFFT) * (mag_frames ** 2)
 
 
-    # librosa.display.specshow(mel_spect, y_axis='mel', fmax=8000, x_axis='time');
-    # plt.title('Mel Spectrogram');
-    # plt.colorbar(format='%+2.0f dB');
+    # 将频率转换为Mel频率
+    low_freq_mel = 0
 
-    # plt.show()
+    nfilt = 40
+    high_freq_mel = (2595 * np.log10(1 + (sr / 2) / 700))
+    mel_points = np.linspace(low_freq_mel, high_freq_mel, nfilt + 2)  # Equally spaced in Mel scale
+    hz_points = (700 * (10**(mel_points / 2595) - 1))  # Convert Mel to Hz
+
+    bin = np.floor((NFFT + 1) * hz_points / sr)
+
+    fbank = np.zeros((nfilt, int(np.floor(NFFT / 2 + 1))))
+
+    for m in range(1, nfilt + 1):
+        f_m_minus = int(bin[m - 1])   # left
+        f_m = int(bin[m])             # center
+        f_m_plus = int(bin[m + 1])    # right
+        for k in range(f_m_minus, f_m):
+            fbank[m - 1, k] = (k - bin[m - 1]) / (bin[m] - bin[m - 1])
+        for k in range(f_m, f_m_plus):
+            fbank[m - 1, k] = (bin[m + 1] - k) / (bin[m + 1] - bin[m])
+    filter_banks = np.dot(pow_frames, fbank.T)
+    filter_banks = np.where(filter_banks == 0, np.finfo(float).eps, filter_banks)  # Numerical Stability
+    mel_spect = 20 * np.log10(filter_banks)  # dB
     return mel_spect
 
 if __name__ == "__main__":
@@ -103,16 +128,16 @@ if __name__ == "__main__":
         # print(f"Portion = {portion:>4f}")
         # os.system("aplay "+data_path+ds.p_file[0])
         data = np.zeros((40,300),dtype=float).tolist()
-        n_tag = "1"
-        p_tag = "0203040"
+        n_tag = [1,1,1,1,1,1,1]
+        p_tag = [0,2,0,3,0,4,0]
         # print(json.dumps(out_temp,separators=[',',':']))
         output = []
 
         for file in tqdm(ds.n_file,position=0,ascii=True,leave=False):
-            out_temp = {'data': melSpec(data_path+file).tolist(),'tag': n_tag}
+            out_temp = {'data': melSpec(data_path+file).tolist(),'tag': n_tag,'len': 1}
             output.append(out_temp)
         for file in tqdm(ds.p_file,position=0,ascii=True,leave=False):
-            out_temp = {'data': melSpec(data_path+file).tolist(),'tag': p_tag}
+            out_temp = {'data': melSpec(data_path+file).tolist(),'tag': p_tag,'len': 7}
             output.append(out_temp)
 
         out_file = open(output_path+"output"+str(i)+".json",'w')
